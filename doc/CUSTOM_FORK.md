@@ -73,14 +73,21 @@ Run CI locally, resolve any custom-code conflicts, then push through a normal PR
 
 ## Deployment controls
 
-The image workflow's deployment job is disabled until the following repository
-configuration exists:
+The homelab uses pull-based deployment, so GitHub has no SSH key or network
+access to the server. The image workflow only publishes images to the public
+GHCR package. Every five minutes, the server pulls `edge`, reads its
+`org.opencontainers.image.revision` label, and deploys the corresponding
+immutable `sha-<full-commit-sha>` tag when it changes.
 
-- Variables: `AUTO_DEPLOY`, `DEPLOY_HOST`, `DEPLOY_PORT`, `DEPLOY_USER`
-- Secrets: `DEPLOY_SSH_KEY`, `DEPLOY_KNOWN_HOSTS`
-- A server-side forced-command SSH key that can invoke only the BiliNote deploy
-  script
+The server-side deployment scripts:
 
-Keep `AUTO_DEPLOY` set to `false` until an immutable image has been pulled and
-verified manually. The deployment script owns health checking and rollback; the
-GitHub workflow only passes the exact image reference to it.
+- allow only images matching
+  `ghcr.io/chengyihao-cyh/bilinote:sha-<40-character-commit-sha>`;
+- verify that PyTorch and CTranslate2 can use the GPU before switching;
+- take a cold backup of the data, config, and static volumes;
+- preserve all four external volumes; and
+- restore the prior image automatically if startup or health checking fails.
+
+The polling task runs from the `cyh` user crontab and uses a deployment lock to
+prevent overlapping manual or automatic releases. No repository Actions secrets
+or deployment variables are required.
