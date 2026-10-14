@@ -1,0 +1,114 @@
+name: Publish Homelab Image
+
+on:
+  push:
+    branches: [master]
+    tags: ['custom-v*']
+  workflow_dispatch:
+    inputs:
+      deploy:
+        description: Deploy the built image to the homelab server
+        required: false
+        default: false
+        type: boolean
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: chengyihao-cyh/bilinote
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: homelab-image-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build CUDA image
+    runs-on: ubuntu-latest
+    outputs:
+      image: ${{ steps.image.outputs.reference }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Resolve application version
+        id: version
+        shell: bash
+        run: |
+          version=$(cat CUSTOM_VERSION)
+          if [[ "$GITHUB_REF" == refs/tags/custom-v* ]]; then
+            version=${GITHUB_REF_NAME#custom-v}
+          else
+            version="${version}+${GITHUB_SHA::7}"
+          fi
+          echo "value=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Resolve immutable image reference
+        id: image
+        shell: bash
+        run: echo "reference=${REGISTRY}/${IMAGE_NAME}:sha-${GITHUB_SHA}" >> "$GITHUB_OUTPUT"
+
+      - name: Extract image metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=raw,value=edge,enable={{is_default_branch}}
+            type=raw,value=sha-${{ github.sha }}
+            type=ref,event=tag
+
+      - name: Build and publish
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.complete
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            INSTALL_CUDA=true
+            TORCH_VERSION=2.6.0
+            VITE_APP_VERSION=${{ steps.version.outputs.value }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  deploy:
+    name: Deploy to homelab
+    needs: build
+    if: >-
+      (github.ref == 'refs/heads/master' && vars.AUTO_DEPLOY == 'true') ||
+      (github.event_name == 'workflow_dispatch' && inputs.deploy)
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - name: Configure restricted deployment key
+        env:
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          DEPLOY_KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+        run: |
+          install -d -m 0700 ~/.ssh
+          printf '%s\n' "$DEPLOY_SSH_KEY" > ~/.ssh/id_ed25519
+          printf '%s\n' "$DEPLOY_KNOWN_HOSTS" > ~/.ssh/known_hosts
+          chmod 0600 ~/.ssh/id_ed25519 ~/.ssh/known_hosts
+
+      - name: Deploy immutable image
+        env:
+          DEPLOY_HOST: ${{ vars.DEPLOY_HOST }}
+          DEPLOY_PORT: ${{ vars.DEPLOY_PORT }}
+          DEPLOY_USER: ${{ vars.DEPLOY_USER }}
+          IMAGE: ${{ needs.build.outputs.image }}
+        run: |
+          ssh -p "$DEPLOY_PORT" "$DEPLOY_USER@$DEPLOY_HOST" "deploy $IMAGE"
