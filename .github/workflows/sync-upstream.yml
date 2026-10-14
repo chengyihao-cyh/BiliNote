@@ -1,0 +1,57 @@
+name: Propose Upstream Sync
+
+on:
+  schedule:
+    - cron: '17 3 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: sync-upstream-master
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    if: github.repository == 'chengyihao-cyh/BiliNote'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Merge upstream into a review branch
+        env:
+          UPSTREAM_URL: https://github.com/JefferyHcool/BiliNote.git
+        run: |
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git remote add upstream "$UPSTREAM_URL"
+          git fetch upstream master --tags
+          git checkout -B sync/upstream-master origin/master
+          git merge --no-edit upstream/master
+
+          if git diff --quiet origin/master...HEAD; then
+            echo "Already up to date."
+            exit 0
+          fi
+
+          git push --force-with-lease origin sync/upstream-master
+
+      - name: Open or update pull request
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if git diff --quiet origin/master...HEAD; then
+            exit 0
+          fi
+
+          if ! gh pr list --head sync/upstream-master --base master --state open --json number --jq 'length > 0' | grep -q true; then
+            gh pr create \
+              --base master \
+              --head sync/upstream-master \
+              --title 'chore(upstream): sync official master' \
+              --body 'Automated proposal to merge the latest official BiliNote master. Review CI and conflicts before merging.'
+          fi
