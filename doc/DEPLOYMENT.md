@@ -130,8 +130,3 @@ explicitly requests that action.
 - Failed container switches restore the previous image.
 - Automatic deployment output is retained in `auto-deploy.log`.
 - External health monitoring detects application outages.
-
-Direct email delivery for deployment failures has not been configured and
-verified. Do not claim it is active until the chosen notification mechanism has
-passed a real delivery test. Recipient addresses and mail credentials must be
-stored outside this public repository.
