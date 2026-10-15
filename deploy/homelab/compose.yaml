@@ -1,0 +1,45 @@
+services:
+  bilinote:
+    image: ${BILINOTE_IMAGE:?Set BILINOTE_IMAGE in .env}
+    container_name: bilinote
+    gpus: all
+    ports:
+      - 127.0.0.1:3015:80
+    environment:
+      HTTP_PROXY: &http_proxy http://172.17.0.1:7891
+      HTTPS_PROXY: *http_proxy
+      ALL_PROXY: &all_proxy socks5://172.17.0.1:7891
+      http_proxy: *http_proxy
+      https_proxy: *http_proxy
+      all_proxy: *all_proxy
+      NO_PROXY: &no_proxy localhost,127.0.0.1,::1,.local,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,.bilibili.com,.bilivideo.com,.bilivideo.cn,.biliapi.net,.hdslb.com,.deepseek.com,.hf-mirror.com
+      no_proxy: *no_proxy
+    volumes:
+      - bilinote-data:/app/backend/data
+      - bilinote-config:/app/backend/config
+      - bilinote-static:/app/backend/static
+      - bilinote-models:/app/backend/models
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - >-
+          import json, urllib.request;
+          data=json.load(urllib.request.urlopen('http://127.0.0.1:8483/api/sys_health', timeout=10));
+          assert data['code'] == 0 and data['data']['backend'] == 'ok'
+      interval: 30s
+      timeout: 15s
+      retries: 3
+      start_period: 30s
+    restart: unless-stopped
+
+volumes:
+  bilinote-data:
+    external: true
+  bilinote-config:
+    external: true
+  bilinote-static:
+    external: true
+  bilinote-models:
+    external: true
