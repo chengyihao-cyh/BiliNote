@@ -69,7 +69,12 @@ def list_task_history(*, include_results: bool = True) -> list[dict[str, Any]]:
 
     task_ids: set[str] = set()
     for path in output_dir.glob("*.json"):
-        candidate = path.name.split(".", 1)[0].split("_", 1)[0]
+        if path.name.endswith(".request.json"):
+            candidate = path.name.removesuffix(".request.json")
+        elif path.name.endswith(".status.json"):
+            candidate = path.name.removesuffix(".status.json")
+        else:
+            candidate = path.stem
         try:
             task_ids.add(str(uuid.UUID(candidate)))
         except ValueError:
@@ -92,6 +97,7 @@ def delete_task_history(task_id: str) -> bool:
         output_dir / f"{task_id}_audio.json",
         output_dir / f"{task_id}_transcript.json",
         output_dir / f"{task_id}_markdown.md",
+        output_dir / f"{task_id}_markdown.status.json",
     )
     deleted = False
     for path in paths:
