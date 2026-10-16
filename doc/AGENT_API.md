@@ -45,7 +45,12 @@ The streamable HTTP endpoint is `/mcp/` and uses the same bearer token. It expos
 - `search_notes`
 - `lookup_transcript`
 
-The MCP server is stateless. Clients must retain the returned job and note identifiers. It does not expose BiliNote's internal RAG question-answering implementation.
+The MCP transport is stateless, but generated jobs are durable. Agent and web
+requests write their status, request metadata, transcript, and final note to the
+same `NOTE_OUTPUT_DIR`; the web console rebuilds its history from that shared
+server-side store. Clients should still retain returned identifiers for direct
+job polling and retrieval. The MCP surface does not expose BiliNote's internal
+RAG question-answering implementation.
 
 ## CLI
 

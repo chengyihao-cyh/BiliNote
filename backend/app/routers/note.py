@@ -12,7 +12,17 @@ from app.db.video_task_dao import get_task_by_video
 from app.enmus.exception import NoteErrorEnum
 from app.enmus.note_enums import DownloadQuality
 from app.exceptions.note import NoteError
-from app.services.note_jobs import persist_prefetched_transcript, submit_note_task, write_job_status
+from app.services.note_jobs import (
+    persist_prefetched_transcript,
+    submit_note_task,
+    write_job_status,
+)
+from app.services.task_history import (
+    TaskHistoryError,
+    delete_task_history,
+    list_task_history,
+    save_task_request,
+)
 from app.utils.logger import get_logger
 from app.utils.response import ResponseWrapper as R
 from app.utils.url_parser import extract_video_id, normalize_video_url
@@ -30,8 +40,9 @@ logger = get_logger(__name__)
 
 
 class RecordRequest(BaseModel):
-    video_id: str
-    platform: str
+    task_id: Optional[str] = None
+    video_id: Optional[str] = None
+    platform: Optional[str] = None
 
 
 class VideoRequest(BaseModel):
@@ -45,7 +56,7 @@ class VideoRequest(BaseModel):
     task_id: Optional[str] = None
     format: Optional[list] = []
     style: str = None
-    extras: Optional[str]=None
+    extras: Optional[str] = None
     video_understanding: Optional[bool] = False
     video_interval: Optional[int] = 0
     grid_size: Optional[list] = []
@@ -59,7 +70,11 @@ class VideoRequest(BaseModel):
     def normalize_url(cls, data):
         # 稍后再看/收藏夹/带追踪参数的 B 站链接先规范化成标准 /video/BVxxx 形式，
         # 后续校验和 yt-dlp 下载拿到的都是干净链接
-        if isinstance(data, dict) and data.get("platform") == "bilibili" and data.get("video_url"):
+        if (
+            isinstance(data, dict)
+            and data.get("platform") == "bilibili"
+            and data.get("video_url")
+        ):
             data["video_url"] = normalize_video_url(str(data["video_url"]))
         return data
 
@@ -70,8 +85,10 @@ class VideoRequest(BaseModel):
         if parsed.scheme in ("http", "https"):
             # 是网络链接，继续用原有平台校验
             if not is_supported_video_url(url):
-                raise NoteError(code=NoteErrorEnum.PLATFORM_NOT_SUPPORTED.code,
-                                message=NoteErrorEnum.PLATFORM_NOT_SUPPORTED.message)
+                raise NoteError(
+                    code=NoteErrorEnum.PLATFORM_NOT_SUPPORTED.code,
+                    message=NoteErrorEnum.PLATFORM_NOT_SUPPORTED.message,
+                )
 
         return v
 
@@ -80,14 +97,22 @@ NOTE_OUTPUT_DIR = os.getenv("NOTE_OUTPUT_DIR", "note_results")
 UPLOAD_DIR = "uploads"
 
 
-@router.post('/delete_task')
+@router.post("/delete_task")
 def delete_task(data: RecordRequest):
     try:
-        # TODO: 待持久化完成
-        # NoteGenerator().delete_note(video_id=data.video_id, platform=data.platform)
-        return R.success(msg='删除成功')
+        if data.task_id:
+            deleted = delete_task_history(data.task_id)
+            return R.success({"deleted": deleted}, msg="删除成功")
+        return R.error(msg="缺少 task_id", code=400)
+    except TaskHistoryError as e:
+        return R.error(msg=e, code=404)
     except Exception as e:
         return R.error(msg=e)
+
+
+@router.get("/tasks")
+def get_tasks(include_results: bool = True):
+    return R.success(list_task_history(include_results=include_results))
 
 
 @router.post("/upload")
@@ -110,6 +135,7 @@ def generate_note(data: VideoRequest):
         # 客户端已抓好字幕（prefetched_transcript）则不需要转写，跳过检查。
         if not data.prefetched_transcript:
             from app.services.transcriber_config_manager import TranscriberConfigManager
+
             readiness = TranscriberConfigManager().is_model_ready()
             if not readiness["ready"]:
                 logger.warning(f"拒绝 generate_note：{readiness['reason']}")
@@ -140,6 +166,14 @@ def generate_note(data: VideoRequest):
         else:
             # 正常新建任务
             task_id = str(uuid.uuid4())
+
+        save_task_request(
+            task_id,
+            source="web",
+            form_data=data.model_dump(
+                mode="json", exclude={"task_id", "prefetched_transcript"}
+            ),
+        )
 
         # 统一先写入 PENDING，表示已进入队列等待串行执行
         write_job_status(task_id, TaskStatus.PENDING)
@@ -190,46 +224,50 @@ def get_task_status(task_id: str):
             if os.path.exists(result_path):
                 with open(result_path, "r", encoding="utf-8") as rf:
                     result_content = json.load(rf)
-                return R.success({
-                    "status": status,
-                    "result": result_content,
-                    "message": message,
-                    "task_id": task_id
-                })
+                return R.success(
+                    {
+                        "status": status,
+                        "result": result_content,
+                        "message": message,
+                        "task_id": task_id,
+                    }
+                )
             else:
                 # 理论上不会出现，保险处理
-                return R.success({
-                    "status": TaskStatus.PENDING.value,
-                    "message": "任务完成，但结果文件未找到",
-                    "task_id": task_id
-                })
+                return R.success(
+                    {
+                        "status": TaskStatus.PENDING.value,
+                        "message": "任务完成，但结果文件未找到",
+                        "task_id": task_id,
+                    }
+                )
 
         if status == TaskStatus.FAILED.value:
             return R.error(message or "任务失败", code=500)
 
         # 处理中状态
-        return R.success({
-            "status": status,
-            "message": message,
-            "task_id": task_id
-        })
+        return R.success({"status": status, "message": message, "task_id": task_id})
 
     # 没有状态文件，但有结果
     if os.path.exists(result_path):
         with open(result_path, "r", encoding="utf-8") as f:
             result_content = json.load(f)
-        return R.success({
-            "status": TaskStatus.SUCCESS.value,
-            "result": result_content,
-            "task_id": task_id
-        })
+        return R.success(
+            {
+                "status": TaskStatus.SUCCESS.value,
+                "result": result_content,
+                "task_id": task_id,
+            }
+        )
 
     # 什么都没有，默认PENDING
-    return R.success({
-        "status": TaskStatus.PENDING.value,
-        "message": "任务排队中",
-        "task_id": task_id
-    })
+    return R.success(
+        {
+            "status": TaskStatus.PENDING.value,
+            "message": "任务排队中",
+            "task_id": task_id,
+        }
+    )
 
 
 @router.get("/image_proxy")
@@ -253,7 +291,7 @@ async def image_proxy(request: Request, url: str):
                 headers={
                     "Cache-Control": "public, max-age=86400",  #  缓存一天
                     "Content-Type": content_type,
-                }
+                },
             )
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
