@@ -78,11 +78,16 @@ class YouTubeSubtitleFetcher:
             fetched = transcript.fetch()
             segments = []
             for snippet in fetched:
-                text = snippet.get("text", "").strip() if isinstance(snippet, dict) else str(snippet).strip()
+                if isinstance(snippet, dict):
+                    text = str(snippet.get("text", "")).strip()
+                    start = snippet.get("start", 0)
+                    duration = snippet.get("duration", 0)
+                else:
+                    text = str(getattr(snippet, "text", "")).strip()
+                    start = getattr(snippet, "start", 0)
+                    duration = getattr(snippet, "duration", 0)
                 if not text:
                     continue
-                start = snippet.get("start", 0) if isinstance(snippet, dict) else 0
-                duration = snippet.get("duration", 0) if isinstance(snippet, dict) else 0
                 segments.append(TranscriptSegment(
                     start=float(start),
                     end=float(start) + float(duration),
