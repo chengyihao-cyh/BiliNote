@@ -56,6 +56,7 @@ Load unpacked at `chrome://extensions/` → select `BillNote_extension/extension
 - `app/routers/` — API routes: `note.py` (generation), `provider.py`, `model.py`, `config.py`, `chat.py` (RAG Q&A on generated notes)
 - `app/services/` — Business logic:
   - `note.py` — `NoteGenerator` orchestrates the full pipeline (download → transcribe → LLM → notes)
+  - `note_jobs.py` + `agent_notes.py` — shared background job dispatch and the sanitized Agent API application layer
   - `task_serial_executor.py` — task queue
   - `chat_service.py` + `chat_tools.py` + `vector_store.py` — RAG-based AI Q&A with Function Calling, indexing transcripts and video metadata
   - `cookie_manager.py` — per-platform cookie storage; injected into yt-dlp by downloaders (e.g. Bilibili)
@@ -66,6 +67,8 @@ Load unpacked at `chrome://extensions/` → select `BillNote_extension/extension
 - `app/db/` — SQLite + SQLAlchemy: DAO pattern (`provider_dao.py`, `model_dao.py`, `video_task_dao.py`), models in `models/`
 - `app/utils/` — `response.py` (ResponseWrapper for consistent JSON), `video_helper.py` (screenshots via FFmpeg), `export.py` (PDF/DOCX), `ppt_generator.py`, `minio_client.py`
 - `app/validators/video_url_validator.py` — URL → platform detection (mirrored client-side in the extension)
+- `app/mcp_server.py` — bearer-protected streamable HTTP MCP endpoint with note generation/retrieval tools; no RAG Q&A tool
+- `bin/bilinote` — dependency-free REST CLI for agents and scripts
 - `app/exceptions/` — `BizException` + handlers wired in `main.py` via `register_exception_handlers`
 - `backend/events/` — Blinker signal system for post-processing (e.g., temp file cleanup after transcription); registered in `lifespan` startup
 - `backend/ffmpeg_helper.py` — `ensure_ffmpeg_or_raise` is called at startup; respects `FFMPEG_BIN_PATH`

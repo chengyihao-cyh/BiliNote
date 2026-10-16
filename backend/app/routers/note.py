@@ -2,20 +2,18 @@
 import json
 import os
 import uuid
-from pathlib import Path
 from typing import Optional
 from urllib.parse import urlparse
 
-from fastapi import APIRouter, HTTPException, BackgroundTasks, UploadFile, File
-from pydantic import BaseModel, validator, field_validator, model_validator
-from dataclasses import asdict
+from fastapi import APIRouter, HTTPException, UploadFile, File
+from pydantic import BaseModel, field_validator, model_validator
 
 from app.db.video_task_dao import get_task_by_video
 from app.enmus.exception import NoteErrorEnum
 from app.enmus.note_enums import DownloadQuality
 from app.exceptions.note import NoteError
-from app.services.note import NoteGenerator, logger
-from app.services.task_serial_executor import task_serial_executor
+from app.services.note_jobs import persist_prefetched_transcript, submit_note_task, write_job_status
+from app.utils.logger import get_logger
 from app.utils.response import ResponseWrapper as R
 from app.utils.url_parser import extract_video_id, normalize_video_url
 from app.validators.video_url_validator import is_supported_video_url
@@ -28,6 +26,7 @@ from app.enmus.task_status_enums import TaskStatus
 # from app.services.whisperer import transcribe_audio
 
 router = APIRouter()
+logger = get_logger(__name__)
 
 
 class RecordRequest(BaseModel):
@@ -81,89 +80,6 @@ NOTE_OUTPUT_DIR = os.getenv("NOTE_OUTPUT_DIR", "note_results")
 UPLOAD_DIR = "uploads"
 
 
-def save_note_to_file(task_id: str, note):
-    os.makedirs(NOTE_OUTPUT_DIR, exist_ok=True)
-    with open(os.path.join(NOTE_OUTPUT_DIR, f"{task_id}.json"), "w", encoding="utf-8") as f:
-        json.dump(asdict(note), f, ensure_ascii=False, indent=2)
-
-
-def _persist_prefetched_transcript(task_id: str, transcript: dict) -> None:
-    """把客户端预取的字幕写到 NoteGenerator 期望的转写缓存文件里。
-
-    NoteGenerator.generate 会优先读 <task_id>_transcript.json，命中即跳过 download_subtitles
-    与音频转写流程。要求字段：language(可空)/full_text/segments[{start,end,text}]
-    """
-    segments = transcript.get("segments") or []
-    cleaned_segments = []
-    for s in segments:
-        text = (s.get("text") or "").strip()
-        if not text:
-            continue
-        cleaned_segments.append({
-            "start": float(s.get("start", 0)),
-            "end": float(s.get("end", 0)),
-            "text": text,
-        })
-    if not cleaned_segments:
-        raise ValueError("prefetched_transcript 没有可用的 segments")
-
-    full_text = transcript.get("full_text") or " ".join(s["text"] for s in cleaned_segments)
-    payload = {
-        "language": transcript.get("language") or "zh",
-        "full_text": full_text,
-        "segments": cleaned_segments,
-    }
-
-    os.makedirs(NOTE_OUTPUT_DIR, exist_ok=True)
-    target = os.path.join(NOTE_OUTPUT_DIR, f"{task_id}_transcript.json")
-    with open(target, "w", encoding="utf-8") as f:
-        json.dump(payload, f, ensure_ascii=False, indent=2)
-    logger.info(f"已写入客户端预取字幕缓存: {target} ({len(cleaned_segments)} 段)")
-
-
-def run_note_task(task_id: str, video_url: str, platform: str, quality: DownloadQuality,
-                  link: bool = False, screenshot: bool = False, model_name: str = None, provider_id: str = None,
-                  _format: list = None, style: str = None, extras: str = None, video_understanding: bool = False,
-                  video_interval=0, grid_size=[]
-                  ):
-
-    if not model_name or not provider_id:
-        raise HTTPException(status_code=400, detail="请选择模型和提供者")
-
-    def _execute_note_task():
-        return NoteGenerator().generate(
-            video_url=video_url,
-            platform=platform,
-            quality=quality,
-            task_id=task_id,
-            model_name=model_name,
-            provider_id=provider_id,
-            link=link,
-            _format=_format,
-            style=style,
-            extras=extras,
-            screenshot=screenshot,
-            video_understanding=video_understanding,
-            video_interval=video_interval,
-            grid_size=grid_size,
-        )
-
-    logger.info(f"任务进入执行队列 (task_id={task_id})")
-    note = task_serial_executor.run(_execute_note_task)
-    logger.info(f"Note generated: {task_id}")
-    if not note or not note.markdown:
-        logger.warning(f"任务 {task_id} 执行失败，跳过保存")
-        return
-    save_note_to_file(task_id, note)
-
-    # 自动建立向量索引（用于 AI 问答），失败不影响笔记生成
-    try:
-        from app.services.vector_store import VectorStoreManager
-        VectorStoreManager().index_task(task_id)
-    except Exception as e:
-        logger.warning(f"向量索引失败（不影响笔记）: {e}")
-
-
 @router.post('/delete_task')
 def delete_task(data: RecordRequest):
     try:
@@ -187,7 +103,7 @@ async def upload(file: UploadFile = File(...)):
 
 
 @router.post("/generate_note")
-def generate_note(data: VideoRequest, background_tasks: BackgroundTasks):
+def generate_note(data: VideoRequest):
     try:
         # 就绪门禁：本地转写引擎（fast-whisper / mlx-whisper）必须等模型下载完才能跑视频，
         # 否则任务会卡在首次下载（慢 / OOM / 截断），用户只看到一个静默失败的任务。
@@ -226,18 +142,31 @@ def generate_note(data: VideoRequest, background_tasks: BackgroundTasks):
             task_id = str(uuid.uuid4())
 
         # 统一先写入 PENDING，表示已进入队列等待串行执行
-        NoteGenerator()._update_status(task_id, TaskStatus.PENDING)
+        write_job_status(task_id, TaskStatus.PENDING)
 
         # 客户端已经抓好字幕的话，写到转写缓存文件，NoteGenerator 的 cache-hit 逻辑会直接用上
         if data.prefetched_transcript:
             try:
-                _persist_prefetched_transcript(task_id, data.prefetched_transcript)
+                persist_prefetched_transcript(task_id, data.prefetched_transcript)
             except Exception as e:
                 logger.warning(f"写入预取字幕失败 (task_id={task_id}): {e}")
 
-        background_tasks.add_task(run_note_task, task_id, data.video_url, data.platform, data.quality, data.link,
-                                  data.screenshot, data.model_name, data.provider_id, data.format, data.style,
-                                  data.extras, data.video_understanding, data.video_interval, data.grid_size)
+        submit_note_task(
+            task_id=task_id,
+            video_url=data.video_url,
+            platform=data.platform,
+            quality=data.quality,
+            link=data.link,
+            screenshot=data.screenshot,
+            model_name=data.model_name,
+            provider_id=data.provider_id,
+            formats=data.format,
+            style=data.style,
+            extras=data.extras,
+            video_understanding=data.video_understanding,
+            video_interval=data.video_interval,
+            grid_size=data.grid_size,
+        )
         return R.success({"task_id": task_id})
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

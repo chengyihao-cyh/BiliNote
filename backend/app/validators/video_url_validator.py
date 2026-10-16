@@ -12,6 +12,27 @@ SUPPORTED_PLATFORMS = {
 }
 
 
+def detect_video_platform(url: str) -> str:
+    """Return the downloader platform for a supported public video URL."""
+    parsed = urlparse(url)
+    host = parsed.netloc.lower().split(":", 1)[0]
+    if host == "b23.tv" or host.endswith(".bilibili.com") or host == "bilibili.com":
+        platform = "bilibili"
+    elif host in {"youtu.be", "youtube.com", "www.youtube.com", "m.youtube.com"}:
+        platform = "youtube"
+    elif host == "douyin.com" or host.endswith(".douyin.com"):
+        platform = "douyin"
+    elif host == "kuaishou.com" or host.endswith(".kuaishou.com"):
+        platform = "kuaishou"
+    else:
+        raise ValueError("Unsupported video platform or URL")
+
+    candidate = normalize_video_url(url) if platform == "bilibili" else url
+    if not is_supported_video_url(candidate):
+        raise ValueError("Unsupported video platform or URL")
+    return platform
+
+
 def is_supported_video_url(url: str) -> bool:
     parsed = urlparse(url)
 
