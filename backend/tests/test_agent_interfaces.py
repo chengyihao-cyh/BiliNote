@@ -210,6 +210,20 @@ def test_server_history_lists_and_deletes_agent_notes(agent_service):
     assert list_task_history() == []
 
 
+def test_server_history_ignores_and_deletes_orphan_markdown_status(agent_service):
+    _, _, output_dir = agent_service
+    task_id = "fef835bc-b5b5-530e-b4a1-6cba5be2c503"
+    orphan_status = output_dir / f"{task_id}_markdown.status.json"
+    orphan_status.write_text(
+        json.dumps({"status": "FAILED", "message": "formatting failed"}),
+        encoding="utf-8",
+    )
+
+    assert list_task_history() == []
+    assert delete_task_history(task_id) is True
+    assert not orphan_status.exists()
+
+
 def test_mcp_exposes_only_supported_note_tools():
     tools = asyncio.run(mcp.list_tools())
     assert {tool.name for tool in tools} == {
