@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+umask 077
 
 image=${1:-}
 remote_dir=${REMOTE_DIR:-/home/cyh/bilinote}
@@ -39,8 +40,11 @@ fi
 
 if [[ -f $env_file ]]; then
   cp -a "$env_file" "$env_backup"
+  awk '!/^[[:space:]]*BILINOTE_IMAGE=/' "$env_file" >"$env_next"
+else
+  : >"$env_next"
 fi
-printf 'BILINOTE_IMAGE=%s\n' "$image" >"$env_next"
+printf 'BILINOTE_IMAGE=%s\n' "$image" >>"$env_next"
 mv "$env_next" "$env_file"
 
 rollback() {

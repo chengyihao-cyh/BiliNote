@@ -50,6 +50,8 @@ configuration must resolve and retain the immutable SHA tag.
 - Container name: `bilinote`
 - Local published port: `127.0.0.1:3015`
 - Application health endpoint: `http://127.0.0.1:3015/api/sys_health`
+- Agent REST prefix: `http://127.0.0.1:3015/api/v1`
+- MCP endpoint: `http://127.0.0.1:3015/mcp/`
 - Automatic deployment log: `/home/cyh/bilinote/auto-deploy.log`
 - Deployment lock: `/home/cyh/bilinote/.deploy.lock`
 - Backup directory: `/home/cyh/bilinote/backups`
@@ -57,6 +59,16 @@ configuration must resolve and retain the immutable SHA tag.
 These paths describe the BiliNote application contract. Changes to generic
 gateway, certificate, or monitoring configuration belong to the server
 infrastructure project instead.
+
+Agent interfaces are disabled unless `BILINOTE_AGENT_TOKEN`,
+`BILINOTE_AGENT_PROVIDER_ID`, and `BILINOTE_AGENT_MODEL_NAME` are configured in
+the preserved runtime `.env`. The REST and MCP endpoints use the same bearer
+token. A reverse-proxy hostname must also be allowlisted with
+`BILINOTE_MCP_ALLOWED_HOSTS`. Exposing them outside the trusted network additionally requires TLS and
+gateway controls in the infrastructure project; do not publish the full legacy
+`/api` surface for agent use. See `doc/AGENT_API.md` for the allowed contract.
+Image deployment updates only `BILINOTE_IMAGE`; every other `.env` entry is
+preserved across successful deployments and rollback.
 
 ## Runtime installation
 

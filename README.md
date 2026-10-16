@@ -52,6 +52,8 @@ BiliNote 是一个开源的 AI 视频笔记助手，支持通过哔哩哔哩、Y
 
 ## 📝 使用文档
 详细文档可以查看[这里](https://docs.bilinote.app/)
+
+面向 Agent 的 REST、MCP 和 CLI 接口见 [Agent interfaces](doc/AGENT_API.md)。
 ## 📦 桌面版下载
 本项目提供了 Windows 和 macOS 桌面客户端，可在 [Releases](https://github.com/JefferyHcool/BiliNote/releases) 页面下载最新版本。
 

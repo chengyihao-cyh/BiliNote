@@ -1,0 +1,203 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import sys
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+
+TERMINAL_STATES = {"SUCCESS", "FAILED"}
+
+
+class CliError(Exception):
+    pass
+
+
+def api_request(method: str, path: str, payload: dict | None = None) -> dict:
+    base_url = os.getenv("BILINOTE_URL", "http://127.0.0.1:3015").rstrip("/")
+    token = os.getenv("BILINOTE_AGENT_TOKEN", "").strip()
+    if not token:
+        raise CliError("BILINOTE_AGENT_TOKEN is required")
+
+    body = json.dumps(payload).encode("utf-8") if payload is not None else None
+    request = urllib.request.Request(
+        f"{base_url}{path}",
+        data=body,
+        method=method,
+        headers={
+            "Accept": "application/json",
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json",
+        },
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=30) as response:
+            return json.load(response)
+    except urllib.error.HTTPError as exc:
+        try:
+            detail = json.load(exc).get("detail", exc.reason)
+        except (json.JSONDecodeError, AttributeError):
+            detail = exc.reason
+        raise CliError(f"HTTP {exc.code}: {detail}") from exc
+    except urllib.error.URLError as exc:
+        raise CliError(f"Cannot reach BiliNote: {exc.reason}") from exc
+
+
+def wait_for_job(job_id: str, interval: float, timeout: float) -> dict:
+    deadline = time.monotonic() + timeout
+    while True:
+        job = api_request("GET", f"/api/v1/jobs/{urllib.parse.quote(job_id)}")
+        if job["status"] in TERMINAL_STATES:
+            return job
+        if time.monotonic() >= deadline:
+            raise CliError(f"Timed out waiting for job {job_id}")
+        time.sleep(interval)
+
+
+def print_result(value, *, as_json: bool, text_field: str | None = None) -> None:
+    if as_json or not text_field:
+        print(json.dumps(value, ensure_ascii=False, indent=2))
+    else:
+        print(value.get(text_field, ""))
+
+
+def run_generate(args) -> None:
+    payload = {
+        "video_url": args.video_url,
+        "quality": args.quality,
+        "include_screenshots": args.screenshots,
+        "include_links": args.links,
+        "style": args.style,
+        "extra_instructions": args.extra_instructions,
+        "request_id": args.request_id,
+    }
+    job = api_request(
+        "POST",
+        "/api/v1/jobs",
+        {key: value for key, value in payload.items() if value is not None},
+    )
+    if not args.wait:
+        print_result(job, as_json=args.json)
+        return
+
+    job = wait_for_job(job["job_id"], args.poll_interval, args.timeout)
+    if job["status"] == "FAILED":
+        raise CliError(job.get("message") or f"Job {job['job_id']} failed")
+    note = api_request("GET", f"/api/v1/notes/{urllib.parse.quote(job['note_id'])}")
+    print_result(note, as_json=args.json, text_field="markdown")
+
+
+def run_status(args) -> None:
+    job = (
+        wait_for_job(args.job_id, args.poll_interval, args.timeout)
+        if args.wait
+        else api_request("GET", f"/api/v1/jobs/{urllib.parse.quote(args.job_id)}")
+    )
+    print_result(job, as_json=args.json)
+
+
+def run_show(args) -> None:
+    note = api_request("GET", f"/api/v1/notes/{urllib.parse.quote(args.note_id)}")
+    print_result(note, as_json=args.json, text_field="markdown")
+
+
+def run_search(args) -> None:
+    query = urllib.parse.urlencode({"query": args.query, "limit": args.limit})
+    result = api_request("GET", f"/api/v1/notes?{query}")
+    if args.json:
+        print_result(result, as_json=True)
+        return
+    for note in result["results"]:
+        print(f"{note['note_id']}\t{note['title']}\n  {note['snippet']}")
+
+
+def run_transcript(args) -> None:
+    query = {
+        key: value
+        for key, value in {
+            "start_time": args.start,
+            "end_time": args.end,
+            "keyword": args.keyword,
+            "limit": args.limit,
+        }.items()
+        if value is not None
+    }
+    suffix = urllib.parse.urlencode(query)
+    result = api_request(
+        "GET",
+        f"/api/v1/notes/{urllib.parse.quote(args.note_id)}/transcript?{suffix}",
+    )
+    if args.json:
+        print_result(result, as_json=True)
+        return
+    for segment in result["segments"]:
+        print(f"[{segment['start']:.1f}-{segment['end']:.1f}] {segment['text']}")
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="bilinote", description="BiliNote agent API client"
+    )
+    parser.add_argument(
+        "--json", action="store_true", help="print machine-readable JSON"
+    )
+    subparsers = parser.add_subparsers(dest="command", required=True)
+
+    generate = subparsers.add_parser("generate", help="create a video-note job")
+    generate.add_argument("video_url")
+    generate.add_argument(
+        "--quality", choices=["fast", "medium", "slow"], default="medium"
+    )
+    generate.add_argument("--screenshots", action="store_true")
+    generate.add_argument("--links", action="store_true")
+    generate.add_argument("--style")
+    generate.add_argument("--extra-instructions")
+    generate.add_argument("--request-id")
+    generate.add_argument("--wait", action="store_true")
+    generate.add_argument("--poll-interval", type=float, default=3.0)
+    generate.add_argument("--timeout", type=float, default=1800.0)
+    generate.set_defaults(handler=run_generate)
+
+    status_parser = subparsers.add_parser("status", help="read a job state")
+    status_parser.add_argument("job_id")
+    status_parser.add_argument("--wait", action="store_true")
+    status_parser.add_argument("--poll-interval", type=float, default=3.0)
+    status_parser.add_argument("--timeout", type=float, default=1800.0)
+    status_parser.set_defaults(handler=run_status)
+
+    show = subparsers.add_parser("show", help="print a completed Markdown note")
+    show.add_argument("note_id")
+    show.set_defaults(handler=run_show)
+
+    search = subparsers.add_parser("search", help="search completed notes")
+    search.add_argument("query", nargs="?", default="")
+    search.add_argument("--limit", type=int, default=10)
+    search.set_defaults(handler=run_search)
+
+    transcript = subparsers.add_parser("transcript", help="look up transcript segments")
+    transcript.add_argument("note_id")
+    transcript.add_argument("--start", type=float)
+    transcript.add_argument("--end", type=float)
+    transcript.add_argument("--keyword")
+    transcript.add_argument("--limit", type=int, default=50)
+    transcript.set_defaults(handler=run_transcript)
+    return parser
+
+
+def main() -> int:
+    parser = build_parser()
+    args = parser.parse_args()
+    try:
+        args.handler(args)
+        return 0
+    except (CliError, KeyError) as exc:
+        print(f"bilinote: {exc}", file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
