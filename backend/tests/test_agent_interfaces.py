@@ -11,6 +11,11 @@ from app.routers.agent import router as agent_router
 from app.services import agent_notes, note_jobs
 from app.services.agent_notes import AgentConflictError, AgentNoteService
 from app.services.provider import ProviderService
+from app.services.task_history import (
+    delete_task_history,
+    list_task_history,
+    save_task_request,
+)
 from fastapi import HTTPException
 from starlette.testclient import TestClient
 
@@ -46,7 +51,7 @@ def test_agent_token_is_required_and_compared(monkeypatch):
 
 
 def test_create_job_is_idempotent_for_request_id(agent_service, monkeypatch):
-    service, submitted, _ = agent_service
+    service, submitted, output_dir = agent_service
     request = CreateVideoNoteRequest(
         video_url="https://youtu.be/abcdefghijk",
         request_id="request-123",
@@ -62,6 +67,11 @@ def test_create_job_is_idempotent_for_request_id(agent_service, monkeypatch):
     assert len(submitted) == 1
     assert submitted[0]["platform"] == "youtube"
     assert submitted[0]["provider_id"] == "provider-1"
+    stored_request = json.loads(
+        (output_dir / f"{first.job_id}.request.json").read_text(encoding="utf-8")
+    )
+    assert stored_request["source"] == "mcp"
+    assert stored_request["form_data"]["video_url"] == "https://youtu.be/abcdefghijk"
 
 
 def test_request_id_reuse_with_different_inputs_is_rejected(agent_service):
@@ -132,6 +142,72 @@ def test_note_and_transcript_are_sanitized_and_bounded(agent_service):
     assert len(search.results) == 1
     assert search.results[0].note_id == job_id
     assert search.results[0].source_url == "https://youtu.be/abcdefghijk"
+
+    legacy_task = list_task_history()[0]
+    assert legacy_task["id"] == job_id
+    assert legacy_task["source"] == "legacy"
+    assert legacy_task["formData"]["video_url"] == "https://youtu.be/abcdefghijk"
+
+
+def test_server_history_lists_and_deletes_agent_notes(agent_service):
+    service, _, output_dir = agent_service
+    response = service.create_job(
+        CreateVideoNoteRequest(video_url="https://youtu.be/abcdefghijk")
+    )
+    result = {
+        "markdown": "# Stored note",
+        "audio_meta": {
+            "title": "Stored title",
+            "platform": "youtube",
+            "video_id": "abcdefghijk",
+            "cover_url": "https://example.com/cover.jpg",
+            "raw_info": {"webpage_url": "https://youtu.be/abcdefghijk"},
+        },
+        "transcript": {
+            "language": "en",
+            "full_text": "stored transcript",
+            "raw": None,
+            "segments": [{"start": 0, "end": 1, "text": "stored"}],
+        },
+    }
+    (output_dir / f"{response.job_id}.json").write_text(
+        json.dumps(result), encoding="utf-8"
+    )
+    note_jobs.write_job_status(response.job_id, TaskStatus.SUCCESS)
+
+    web_task_id = "f504a5a9-9d68-4ae6-97aa-bad5d418b271"
+    save_task_request(
+        web_task_id,
+        source="web",
+        form_data={
+            "video_url": "https://youtu.be/lmnopqrstuv",
+            "platform": "youtube",
+        },
+    )
+    (output_dir / f"{web_task_id}.json").write_text(
+        json.dumps({**result, "markdown": "# Web note"}), encoding="utf-8"
+    )
+    note_jobs.write_job_status(web_task_id, TaskStatus.SUCCESS)
+
+    history = list_task_history()
+    assert len(history) == 2
+    assert {task["source"] for task in history} == {"mcp", "web"}
+    agent_task = next(task for task in history if task["id"] == response.job_id)
+    assert agent_task["markdown"] == "# Stored note"
+    assert agent_task["transcript"]["full_text"] == "stored transcript"
+
+    summary = next(
+        task
+        for task in list_task_history(include_results=False)
+        if task["id"] == response.job_id
+    )
+    assert summary["audioMeta"]["title"] == "Stored title"
+    assert summary["markdown"] == ""
+    assert summary["transcript"]["segments"] == []
+
+    assert delete_task_history(response.job_id) is True
+    assert delete_task_history(web_task_id) is True
+    assert list_task_history() == []
 
 
 def test_mcp_exposes_only_supported_note_tools():

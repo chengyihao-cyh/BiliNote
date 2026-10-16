@@ -16,6 +16,7 @@ from app.models.agent_api import (
     TranscriptSegmentResponse,
 )
 from app.services import note_jobs
+from app.services.task_history import save_task_request
 from app.services.transcriber_config_manager import TranscriberConfigManager
 from app.utils.url_parser import normalize_video_url
 from app.validators.video_url_validator import detect_video_platform
@@ -54,15 +55,6 @@ def _read_json(path: Path) -> dict:
         return json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
         raise AgentNoteError(f"Cannot read stored note data: {path.name}") from exc
-
-
-def _write_json_atomic(path: Path, payload: dict) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_suffix(path.suffix + ".tmp")
-    temporary.write_text(
-        json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
-    )
-    temporary.replace(path)
 
 
 def _validated_job_id(job_id: str) -> str:
@@ -118,23 +110,36 @@ class AgentNoteService:
             if not readiness["ready"]:
                 raise AgentNotReadyError(readiness["reason"])
 
-            _write_json_atomic(
-                request_path,
-                {
-                    "job_id": job_id,
-                    "fingerprint": fingerprint,
-                    "video_url": video_url,
-                    "platform": platform,
-                    "profile": request.profile,
-                },
-            )
-            note_jobs.write_job_status(job_id, TaskStatus.PENDING, "Queued")
-
             formats = []
             if request.include_links:
                 formats.append("link")
             if request.include_screenshots:
                 formats.append("screenshot")
+            save_task_request(
+                job_id,
+                source="mcp",
+                form_data={
+                    "video_url": video_url,
+                    "platform": platform,
+                    "quality": request.quality.value,
+                    "screenshot": request.include_screenshots,
+                    "link": request.include_links,
+                    "model_name": model_name,
+                    "provider_id": provider_id,
+                    "format": formats,
+                    "style": request.style or "minimal",
+                    "extras": request.extra_instructions or "",
+                    "video_understanding": False,
+                    "video_interval": 6,
+                    "grid_size": [2, 2],
+                },
+                metadata={
+                    "fingerprint": fingerprint,
+                    "profile": request.profile,
+                },
+            )
+            note_jobs.write_job_status(job_id, TaskStatus.PENDING, "Queued")
+
             note_jobs.submit_note_task(
                 task_id=job_id,
                 video_url=video_url,
